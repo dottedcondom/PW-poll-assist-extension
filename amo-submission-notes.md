@@ -3,7 +3,7 @@
 Reference copy for the "Version notes" and "Notes to Reviewer" fields when
 submitting to addons.mozilla.org. Paste the relevant block into the form.
 
-## Version notes (v3.5.2)
+## Version notes (v3.7.0)
 
 Bug-fix release for poll detection and submission. The poll panel could fail to
 open, or be closed again, when a poll started (the site's poll icon is a toggle
@@ -15,19 +15,22 @@ skipped because of client/server clock skew; a deselected or changed answer
 still being submitted after the delay; a stale answer staying armed for the
 next poll; the extension disabling itself after a cancelled "leave page?"
 prompt; stalling while the tab is in the background; and high idle CPU use on
-busy pages. No artificial delays are introduced: the only wait is the user-set
-"Delay before submitting", and 0 means Submit follows as soon as the page has
-registered the selected option (it is never clicked before that). Work is now
-triggered directly by DOM changes.
+busy pages.
 
-Change to the MAIN-world WebSocket hook (websocket-hook.js): frames delivered
-as Blob objects (the WebSocket default when binaryType is unchanged) were
-previously ignored. The hook now reads only the first 16 bytes of such a frame
-to apply the same `poll {` prefix filter as for text frames, and reads the rest
-only if that prefix matches. Non-poll frames are still never inspected,
-stored, or forwarded. No new permissions.
-
-Full version history is documented in README.md.
+Interaction timing: the site refuses a Submit that follows the option click by
+less than ~10 ms (it shows its own "Unauthorised Scope Access" message), so the
+extension never sends one sooner (a "Click timing" setting offers Fast, the
+default; Careful, which also waits a painted frame between steps; and Exact,
+which adds no waits of its own). Submit is only clicked once the page has
+visibly registered the selected option, a click the page ignores is retried (up
+to 3 times), an already-selected option is never clicked and an option the page
+rebuilt is never re-clicked, and an empty answer is never submitted. After
+Submit is clicked the extension reports whether the page showed any sign of
+accepting it, and if the page shows an authorisation error it reports which
+step it followed. The status line also shows measured timing. Outgoing
+poll-topic WebSocket frames (already forwarded by the hook in earlier versions)
+are used, locally, as one signal that the answer was sent. No new permissions,
+no network requests.
 
 ## Notes to Reviewer
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Poll Assist for PW Live",
-  "version": "3.5.2",
+  "version": "3.7.0",
   "description": "Pre-select your poll answer and submit it instantly the moment a poll appears on PW.live.",
   "permissions": ["storage"],
   "browser_specific_settings": {

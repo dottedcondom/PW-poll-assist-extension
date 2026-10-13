@@ -7,74 +7,94 @@
 </head>
 <body>
   <header class="app-header">
-    <img src="icons/icon48.png" alt="" class="app-icon" width="26" height="26">
-    <h1>Poll Assist</h1>
+    <img src="icons/icon48.png" alt="" class="app-icon" width="34" height="34">
+    <div class="brand-copy">
+      <h1>Poll Assist</h1>
+      <p>Extension settings</p>
+    </div>
     <span class="version-badge" id="versionBadge"></span>
   </header>
 
-  <section class="settings-section">
-    <div class="setting-row">
-      <div class="setting-label">
-        <span class="setting-title">Auto-submit</span>
-        <span class="setting-desc">Click Submit once your pre-chosen answer is selected.</span>
+  <main class="settings-content">
+    <div class="section-heading">Answer behavior</div>
+    <section class="settings-section" aria-label="Answer behavior">
+      <div class="setting-row">
+        <div class="setting-label">
+          <span class="setting-title">Auto-submit</span>
+          <span class="setting-desc">Submit after your answer is selected.</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="autoSubmitEnabled">
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </label>
       </div>
-      <label class="switch">
-        <input type="checkbox" id="autoSubmitEnabled">
-        <span class="switch-track"><span class="switch-thumb"></span></span>
-      </label>
-    </div>
 
-    <div class="setting-row column">
-      <div class="setting-label">
-        <span class="setting-title">Delay before submitting</span>
-        <span class="setting-desc">Time to wait after selecting an answer before clicking Submit.</span>
-      </div>
-      <div class="delay-control">
-        <input type="range" id="submitDelay" min="0" max="5" step="0.1" class="slider">
-        <div class="delay-value">
-          <input type="number" id="submitDelayNumber" min="0" max="60" step="0.05" class="number-input">
-          <span class="unit">s</span>
+      <div class="setting-row column">
+        <div class="setting-label">
+          <span class="setting-title">Delay before submitting</span>
+          <span class="setting-desc">Wait after selecting an answer before submitting.</span>
+        </div>
+        <div class="delay-control">
+          <input type="range" id="submitDelay" min="0" max="5" step="0.1" class="slider" aria-label="Delay before submitting">
+          <div class="delay-value">
+            <input type="number" id="submitDelayNumber" min="0" max="60" step="0.05" class="number-input" aria-label="Delay in seconds">
+            <span class="unit">s</span>
+          </div>
         </div>
       </div>
-    </div>
 
-    <div class="setting-row">
-      <div class="setting-label">
-        <span class="setting-title">Hide with video controls</span>
-        <span class="setting-desc">Fades with real mouse activity over the player.</span>
+      <div class="setting-row pacing-row">
+        <div class="setting-label">
+          <span class="setting-title">Click timing</span>
+          <span class="setting-desc" id="pacingDesc"></span>
+        </div>
+        <div class="seg" id="pacing" role="radiogroup" aria-label="Click timing">
+          <button type="button" role="radio" data-val="fast">Fast</button>
+          <button type="button" role="radio" data-val="careful">Careful</button>
+          <button type="button" role="radio" data-val="exact">Exact</button>
+        </div>
       </div>
-      <label class="switch">
-        <input type="checkbox" id="hideWithPlayerControls">
-        <span class="switch-track"><span class="switch-thumb"></span></span>
-      </label>
-    </div>
+    </section>
 
-    <div class="setting-row">
-      <div class="setting-label">
-        <span class="setting-title">Auto-open poll panel</span>
-        <span class="setting-desc">Opens the panel as soon as a poll becomes available.</span>
+    <div class="section-heading">Player experience</div>
+    <section class="settings-section" aria-label="Player experience">
+      <div class="setting-row">
+        <div class="setting-label">
+          <span class="setting-title">Hide with video controls</span>
+          <span class="setting-desc">Fade the panel with player controls.</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="hideWithPlayerControls">
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </label>
       </div>
-      <label class="switch">
-        <input type="checkbox" id="autoOpenPollPanel">
-        <span class="switch-track"><span class="switch-thumb"></span></span>
-      </label>
-    </div>
-  </section>
 
-  <div class="section-divider"></div>
-
-  <section class="settings-section">
-    <div class="setting-row">
-      <div class="setting-label">
-        <span class="setting-title">Debug logging</span>
-        <span class="setting-desc">Verbose console output (F12) for troubleshooting.</span>
+      <div class="setting-row">
+        <div class="setting-label">
+          <span class="setting-title">Auto-open poll panel</span>
+          <span class="setting-desc">Open the panel when a poll is available.</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="autoOpenPollPanel">
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </label>
       </div>
-      <label class="switch">
-        <input type="checkbox" id="debug">
-        <span class="switch-track"><span class="switch-thumb"></span></span>
-      </label>
-    </div>
-  </section>
+    </section>
+
+    <div class="section-heading">Troubleshooting</div>
+    <section class="settings-section" aria-label="Troubleshooting">
+      <div class="setting-row">
+        <div class="setting-label">
+          <span class="setting-title">Debug logging</span>
+          <span class="setting-desc">Show detailed logs in the browser console.</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="debug">
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </label>
+      </div>
+    </section>
+  </main>
 
   <footer class="app-footer">
     <button id="resetBtn" class="text-btn">Reset to defaults</button>

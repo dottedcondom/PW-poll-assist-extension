@@ -7,6 +7,8 @@
     debug: false,
     hideWithPlayerControls: true,
     autoOpenPollPanel: true,
+    pacing: "fast",
+    fastMode: false, // legacy switch from 3.6.0 (means "instant"); cleared whenever Click timing is changed
   };
 
   const autoSubmitEl = document.getElementById("autoSubmitEnabled");
@@ -14,14 +16,33 @@
   const submitDelayNumberEl = document.getElementById("submitDelayNumber"); // in seconds, 0-60
   const hideWithPlayerControlsEl = document.getElementById("hideWithPlayerControls");
   const autoOpenPollPanelEl = document.getElementById("autoOpenPollPanel");
+  const pacingEl = document.getElementById("pacing");
+  const pacingDescEl = document.getElementById("pacingDesc");
+  const PACING_TEXT = {
+    fast: "As fast as PW.live accepts: acts the moment the poll appears and sends Submit 10 ms after the option click. Recommended.",
+    careful: "Also waits for the page to paint before clicking, and a frame before Submit, like the original. Slowest.",
+    exact: "No waits of its own: Submit goes exactly when your delay says. PW.live refuses a Submit under ~10 ms, so keep the delay at 0.01 s or more.",
+  };
+  // Old names (and the 3.6.0 on/off Fast mode switch) still map onto the three choices.
+  function normalizePacing(settings) {
+    const alias = { safe: "careful", frame: "fast", instant: "exact" };
+    let p = alias[settings.pacing] || settings.pacing;
+    if (p !== "fast" && p !== "careful" && p !== "exact") p = "fast";
+    if (p === "fast" && settings.fastMode) p = "exact";
+    return p;
+  }
+  function renderPacing(settings) {
+    const val = normalizePacing(settings);
+    for (const b of pacingEl.querySelectorAll("button")) b.setAttribute("aria-checked", String(b.dataset.val === val));
+    pacingDescEl.textContent = PACING_TEXT[val];
+  }
   const debugEl = document.getElementById("debug");
   const resetBtn = document.getElementById("resetBtn");
   const statusEl = document.getElementById("statusMsg");
   const versionBadgeEl = document.getElementById("versionBadge");
 
-  // Single source of truth for the version display — read from the
-  // manifest instead of a hardcoded string that has to be kept in sync
-  // by hand (see the matching note in content.js's buildDropdown()).
+  // Read the popup's version display from the manifest rather than
+  // hardcoding a string that has to be kept in sync by hand.
   try {
     if (versionBadgeEl) versionBadgeEl.textContent = `v${chrome.runtime.getManifest().version}`;
   } catch (err) {
@@ -71,6 +92,7 @@
     updateSliderFill();
     hideWithPlayerControlsEl.checked = settings.hideWithPlayerControls;
     autoOpenPollPanelEl.checked = settings.autoOpenPollPanel;
+    renderPacing(settings);
     debugEl.checked = settings.debug;
   }
 
@@ -153,6 +175,14 @@
 
   autoOpenPollPanelEl.addEventListener("change", () => {
     saveField({ autoOpenPollPanel: autoOpenPollPanelEl.checked });
+  });
+
+  pacingEl.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-val]");
+    if (!b) return;
+    // Writing `fastMode: false` clears the old 3.6.0 switch so it can't override this choice.
+    saveField({ pacing: b.dataset.val, fastMode: false });
+    renderPacing({ pacing: b.dataset.val, fastMode: false });
   });
 
   debugEl.addEventListener("change", () => {

@@ -42,13 +42,20 @@
  * - A poll's deadline is measured from when the event was *received*, not
  *   from the payload's server-side pollStartTime: client clocks drift, and
  *   trusting the server timestamp made polls look "already expired".
- * - No delay of its own is ever added: the only wait a user can hit is their
- *   own "Delay before submitting" (0 means 0). Work is triggered by DOM
- *   changes, and there are no timers on the happy path. Two things are
- *   waited for, each only for as long as the page itself takes: one browser
- *   task before the first icon click (so the site can finish rendering the
- *   poll it just received), and the page's own reaction to the option click
- *   (Submit must never land before the option is marked — see "confirm").
+ * - Click timing. Measured on the real PW.live: it refuses a Submit that
+ *   comes less than ~10 ms after the option click (an error such as
+ *   "Unauthorised Scope Access"), while the first click can go the instant the
+ *   poll is drawn. So the default "fast" mode acts at once and keeps
+ *   MIN_SUBMIT_GAP_MS between the option click and Submit; "careful" also waits a
+ *   painted frame (+ a floor) before the first click and before Submit, like the
+ *   original; "exact" adds nothing of its own (the user's delay decides). If
+ *   PW.live refuses a Submit anyway, "fast" learns a longer gap for the next polls.
+ *   In every mode: Submit is only clicked once the page has visibly registered
+ *   the option; an ignored option click is retried (OPTION_MAX_TRIES) rather than
+ *   followed by an empty Submit; an option the page rebuilt is followed, never
+ *   re-clicked (a 2nd click can unselect it); an already-selected option is never
+ *   clicked; and the page's own error messages are noticed and attributed to the
+ *   step they followed (see "What the PAGE says back").
  * - Time-critical steps use nextFrame(): requestAnimationFrame with a timer
  *   fallback, because rAF never fires while the class tab is in the background.
  * - If PW.live changes its markup further, the things most likely to
@@ -72,7 +79,13 @@
     OPEN_VERIFY_MS: 1200, // after our click, how long to wait for the poll to show up before a single retry
     MAX_OPEN_CLICKS: 2, // per poll: the 2nd click only ever happens for an armed answer whose panel still didn't show up
     STALE_UI_TIMEOUT_MS: 400, // longest an on-screen UI that is state-for-state identical to the PREVIOUS poll's is treated as "old" rather than the new poll
-    SELECTION_CONFIRM_MS: 200, // most we wait for the page to visibly register a clicked option before clicking Submit anyway (normally it's a few ms)
+    SUBMIT_CONFIRM_MS: 3000, // how long after clicking Submit we look for any sign the page took it, before saying it didn't confirm
+    MIN_SUBMIT_GAP_MS: 10, // PW.live refuses a Submit that follows the option click by less than this (measured on the real page: 0 ms is refused, 10 ms works). "fast" mode never goes below it
+    PACE_MS: 24, // "careful" mode: least time from the poll UI first appearing to the first click (about what the original left). Fast mode skips it
+    PACE_SUBMIT_MS: 16, // "careful" mode: least time from the option click to Submit (one frame, like the original). Fast mode skips it
+    OPTION_RETRY_AFTER_ERROR_MS: 60, // ...but when the page has explicitly said no (an "Unauthorised..." message), retry after 60ms x tries instead
+    OPTION_RETRY_MS: 300, // no sign the page took the option click after this long -> click again (it's safe: nothing is selected)
+    OPTION_MAX_TRIES: 3, // ...up to this many clicks in total; after that we stop WITHOUT submitting an empty answer
     SUBMIT_SAFETY_MARGIN_MS: 300, // leave this much of the poll's real window for the click itself to land
     POLL_END_GRACE_MS: 1500, // keep working this long past the reported expiry (latency / clock slop) before giving up
     UNKNOWN_POLL_WINDOW_MS: 60000, // window to assume when a poll is detected without WebSocket timing info
@@ -92,6 +105,8 @@
     debug: false,
     hideWithPlayerControls: true, // fade with the video player's own controls
     autoOpenPollPanel: true, // proactively click the poll icon if no poll is currently showing
+    pacing: "fast", // click timing: "fast" (default) | "careful" (waits a painted frame between steps, like the original) | "exact" (no waits of ours: your delay decides)
+    fastMode: false, // legacy on/off switch from 3.6.0 — means "exact" (see pacingMode)
   };
   let settings = Object.assign({}, DEFAULT_SETTINGS);
 
@@ -153,6 +168,7 @@
 
   // ================= State =================
   let selectedOption = null; // "A" | "B" | "C" | "D" | null
+  let armedPerf = 0; // same moment on the high-resolution clock (for the timing readout)
   let armedAt = 0; // when selectedOption was last armed (ms epoch) — tells "meant for this poll" from "meant for the next one"
   let answerWrapRef = null;
   let dropdownRef = null;
@@ -186,7 +202,6 @@
     dropdown.innerHTML = `
       <div class="pw-header">
         <span class="pw-header-title">Poll Assist</span>
-        <span class="pw-header-badge" id="pw-version-badge"></span>
       </div>
       <div class="pw-toggle-row">
         <span class="pw-toggle-label">Auto-submit</span>
@@ -207,18 +222,6 @@
       </div>
     `;
     document.body.appendChild(dropdown);
-
-    // Single source of truth for the version display: read it from the
-    // manifest rather than hardcoding it here (and in popup.html) as
-    // separate strings that have to be remembered and kept in sync by
-    // hand on every release — a fragile process that has already drifted
-    // at least once.
-    try {
-      const badge = dropdown.querySelector("#pw-version-badge");
-      if (badge) badge.textContent = `v${chrome.runtime.getManifest().version}`;
-    } catch (err) {
-      logError("Couldn't read extension version", err);
-    }
 
     return dropdown;
   }
@@ -252,9 +255,10 @@
     if (iconRef) iconRef.classList.toggle("pw-armed", !!isArmed);
   }
 
-  function setStatus(text, kind) {
-    if (dropdownRef && dropdownRef._pwSetStatus) dropdownRef._pwSetStatus(text, kind);
+  function setStatus(text, kind, detail) {
+    if (dropdownRef && dropdownRef._pwSetStatus) dropdownRef._pwSetStatus(text, kind, detail);
     log("status:", text);
+    if (detail) log("timeline:\n" + detail);
   }
 
   function wireDropdown(dropdown) {
@@ -309,8 +313,11 @@
     });
 
     // kind: "idle" (default gray) | "ready" (blue) | "success" (green) | "warning" (amber)
-    dropdown._pwSetStatus = (text, kind) => {
+    dropdown._pwSetStatus = (text, kind, detail) => {
       statusTextEl.textContent = text;
+      // Hovering the status line shows the step-by-step timing (when there is one).
+      if (detail) statusTextEl.title = detail;
+      else statusTextEl.removeAttribute("title");
       statusIconEl.className = "pw-status-icon" + (kind ? ` pw-status-${kind}` : "");
     };
   }
@@ -318,6 +325,7 @@
   function resetSelectionAfterPoll() {
     selectedOption = null;
     armedAt = 0;
+    armedPerf = 0;
     setArmedVisual(false);
     if (dropdownRef) {
       dropdownRef.querySelectorAll(".pw-opt-btn").forEach((b) => {
@@ -530,9 +538,11 @@
 
   // A short text fingerprint of the poll UI, used to tell "the previous
   // poll's leftover UI" apart from "the new poll's UI" (see isLeftoverUi).
-  function uiSignature(node) {
+  function uiSignature(node, normaliseDigits) {
     try {
-      let sig = (node.textContent || "").replace(/\s+/g, " ").trim().slice(0, 400);
+      let text = (node.textContent || "").replace(/\s+/g, " ").trim();
+      if (normaliseDigits) text = text.replace(/\d+/g, "#");
+      let sig = text.slice(0, 400);
       // Text alone isn't enough: consecutive polls often have identical text
       // (just "A B C D"). What tells a fresh UI from a used one is its
       // *state* — enabled vs disabled, selected vs not.
@@ -720,7 +730,19 @@
   let sessionSeq = 0;
   const handledPollStartIds = new Set();
 
-  function beginSession({ id, meta, source }) {
+  // High-resolution clock for the timing readout: Date.now() is whole
+  // milliseconds, too coarse to show a ~1 ms step.
+  function tnow() {
+    return typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+  }
+
+  function fmtMs(ms) {
+    if (!isFinite(ms) || ms < 0) ms = 0;
+    if (ms >= 1000) return `${(ms / 1000).toFixed(1)} s`;
+    return `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
+  }
+
+  function beginSession({ id, meta, source, viaArm }) {
     if (destroyed) return null;
     const now = Date.now();
     const durationMs = meta && typeof meta.durationMs === "number" ? meta.durationMs : CONFIG.UNKNOWN_POLL_WINDOW_MS;
@@ -761,6 +783,11 @@
       warnedUnarmed: false,
       staleMark: lastUiMark, // what the poll UI looked like BEFORE this poll
       settled: false, // true once the site has had one task to render what it just received
+      t0: tnow(), // when we learned of the poll (hi-res clock) — the zero point of the timing readout
+      viaArm: !!viaArm, // started because the user armed an answer while the poll UI was already up
+      submitCheck: null, // set once Submit has been clicked: are we seeing the page accept it?
+      pageErrors: [], // error messages the PAGE showed while we were acting (PW.live's own, e.g. "Unauthorised Scope Access")
+      errorObserver: null,
     };
     session = s;
     log("Poll session started:", id, `(${source})`);
@@ -777,7 +804,14 @@
   function endSession(s, reason) {
     if (!s || s.state === "ended") return;
     s.state = "ended";
+    stopPageErrorWatch(s);
     dropAttempt(s);
+    if (s.submitCheck && !s.submitCheck.done) {
+      // Only speak up if the poll simply ran out; if a new poll took over, its
+      // own statuses are about to replace this one anyway.
+      if (reason === "expired") evaluateSubmitCheck(s, currentPollContainer(), Date.now());
+      else finishSubmitCheck(s, null, true);
+    }
     lastEndedAt = Date.now();
     noteUi(currentPollContainer(), true);
     if (reason === "expired" && !s.answered && selectedOption && armedAt <= s.deadlineAt) {
@@ -805,7 +839,7 @@
         logError("superviseSession failed", err);
       }
       if (!session || session.state === "ended") supervisorRunning = false;
-      else if (session.answered) setTimeout(step, 250); // just watching the UI settle now
+      else if (session.answered && !(session.submitCheck && !session.submitCheck.done)) setTimeout(step, 250); // just watching the UI settle now
       else nextFrame(step);
     };
     step();
@@ -908,7 +942,10 @@
 
     const container = currentPollContainer();
     noteUi(container);
-    if (s.answered) return; // nothing left to do for this poll
+    if (s.answered) {
+      if (s.submitCheck && !s.submitCheck.done) evaluateSubmitCheck(s, container, now);
+      return; // nothing left to do for this poll
+    }
 
     if (now > s.deadlineAt) {
       // The poll's window is over. The grace period exists so an attempt
@@ -925,14 +962,67 @@
     }
     if (container) {
       if (isLeftoverUi(s, container, now)) return; // wait for the site to swap in the new poll
+      noteSettle(s, container);
       if (!selectedOption) {
         warnUnarmedOnce(s);
         return;
       }
+      if (!uiSettled(s, container)) return; // the page is still finishing drawing this poll
       beginAttempt(s, container, now);
       return;
     }
     maybeOpenPanel(s, now);
+  }
+
+  // ================= Pacing =================
+  // A page needs a moment AFTER it draws the poll before it will take a click
+  // (its own post-render work: effects, loading your permissions/"scope"...).
+  // A click that lands in the same instant the poll appears can be rejected —
+  // the page shows an error and the option never gets marked. The original
+  // extension never ran into this because it always acted at least a frame
+  // later. So by default we wait for ONE painted frame, one more task, and a
+  // small floor (PACE_MS) after the poll UI first appears. Fast mode skips it.
+  // Click timing. "fast" (default): act the moment the poll is on screen and
+  // send Submit MIN_SUBMIT_GAP_MS after the option click — the least PW.live
+  // accepts. "careful": also wait a painted frame (+ a floor) before the first
+  // click and before Submit, like the original did. "exact": no waits of our own;
+  // the user's "Delay before submitting" alone decides. (`fastMode` is the old
+  // 3.6.0 switch and means "exact"; old names "safe"/"frame"/"instant" still work.)
+  function pacingMode() {
+    const alias = { safe: "careful", frame: "fast", instant: "exact" };
+    let p = alias[settings.pacing] || settings.pacing;
+    if (p !== "fast" && p !== "careful" && p !== "exact") p = "fast";
+    if (p === "fast" && settings.fastMode) p = "exact";
+    return p;
+  }
+
+  // Grows (only ever within a page session) when PW refuses a Submit even after
+  // MIN_SUBMIT_GAP_MS, so the NEXT polls wait longer. Not saved anywhere.
+  let learnedSubmitGapMs = 0;
+
+  function noteSettle(s, container) {
+    const mode = pacingMode();
+    if (mode !== "careful" || s.settleNode === container) return;
+    s.settleNode = container;
+    s.settledNode = null;
+    const seenAt = tnow();
+    const floor = CONFIG.PACE_MS;
+    const finish = () => {
+      if (session !== s || s.state !== "live" || s.settleNode !== container) return;
+      s.settledNode = container;
+      superviseSession();
+    };
+    nextFrame(() =>
+      afterSiteTask(() => {
+        const wait = floor - (tnow() - seenAt);
+        if (wait > 0) setTimeout(finish, wait);
+        else finish();
+      }, true)
+    );
+  }
+
+  function uiSettled(s, container) {
+    return pacingMode() !== "careful" || s.settledNode === container;
   }
 
   // ================= Selecting + submitting =================
@@ -963,11 +1053,23 @@
       reselects: 0,
       sawSelected: false, // the page has shown our option as selected at least once
       clickedAt: 0, // when we last clicked the option
-      reacted: false, // the page changed the option in response to that click
+      tries: 0, // option clicks so far
+      sigBefore: "", // option list state just before the last click
+      submitWasDisabled: false,
+      replaced: false, // the page rebuilt the option element after our click
       hopStarted: false,
       hopDone: false,
       optionObserver: null,
+      armedPerf, // when the answer was picked
+      tBegin: tnow(), // poll UI on screen and an answer waiting for it
+      tSelected: 0, // option clicked
+      tMarked: 0, // page registered it
       lostAt: 0,
+      delayTimer: 0,
+      tFirstDone: 0, // first option click delivered
+      tLastDone: 0, // latest option click delivered
+      userDelayMs: 0,
+      floorMs: 0,
     };
     log(`Attempting "${letter}" on poll ${s.id}.`);
     advanceAttempt(s, container, now);
@@ -985,20 +1087,23 @@
   }
 
   function dropAttempt(s) {
-    if (s && s.attempt) stopOptionWatch(s.attempt);
+    if (s && s.attempt) {
+      stopOptionWatch(s.attempt);
+      if (s.attempt.delayTimer) clearTimeout(s.attempt.delayTimer);
+    }
     if (s) s.attempt = null;
   }
 
   function watchOptionReaction(s, a, btn) {
     stopOptionWatch(a);
     try {
+      // Only a wake-up call: re-check the evidence the moment the option list
+      // changes, rather than on the next frame.
       const mo = new MutationObserver(() => {
-        if (a.reacted) return;
-        a.reacted = true;
-        if (session === s && s.attempt === a) superviseSession(); // right now, not next frame
+        if (session === s && s.attempt === a) superviseSession();
       });
-      mo.observe(btn, { attributes: true, childList: true, subtree: true, characterData: true });
-      if (btn.parentElement) mo.observe(btn.parentElement, { attributes: true, childList: true });
+      const root = btn.closest('[role="radiogroup"], [role="listbox"], [role="group"]') || btn.parentElement || btn;
+      mo.observe(root, { attributes: true, childList: true, subtree: true, characterData: true });
       a.optionObserver = mo;
     } catch (err) {
       logError("watchOptionReaction failed", err);
@@ -1008,18 +1113,77 @@
   function clickOption(s, a, btn, now) {
     a.optionBtn = btn;
     a.clickedAt = now;
+    a.tries = (a.tries || 0) + 1;
     if (!a.selectedAt) a.selectedAt = now; // the delay you set counts from the FIRST selection
-    a.reacted = false;
+    if (!a.tSelected) a.tSelected = tnow();
     a.hopStarted = false;
     a.hopDone = false;
     a.sawSelected = false;
+    a.replaced = false;
+    // What the option list and Submit look like BEFORE the click, so a change
+    // afterwards is evidence the page took it.
+    a.sigBefore = optionListSig(btn);
+    const sb0 = findSubmitButton(currentPollContainer());
+    a.submitWasDisabled = !!sb0 && (sb0.disabled || sb0.getAttribute("aria-disabled") === "true");
+    watchPageErrors(s);
     watchOptionReaction(s, a, btn); // before the click, so a synchronous reaction is caught too
     btn.click();
+    // The clocks for the delay and for PW.live's minimum gap start NOW, once the
+    // click has really been delivered (not just before it).
+    a.tLastDone = tnow();
+    if (!a.tFirstDone) a.tFirstDone = a.tLastDone;
     // Pages that react without touching the DOM (e.g. only a radio's `checked`)
     // never trigger the observer — look again one task later.
     afterSiteTask(() => {
       if (session === s && s.attempt === a) superviseSession();
     }, true);
+  }
+
+  // A fingerprint of the option list's STATE: structure, classes, aria/
+  // checked/disabled flags, text length (digits normalised). It changes when the
+  // page marks (or unmarks) an option, and is deliberately blind to a ticking
+  // countdown elsewhere on the poll.
+  function optionListSig(btn) {
+    try {
+      const root = btn.closest('[role="radiogroup"], [role="listbox"], [role="group"]') || btn.parentElement || btn;
+      let sig = "";
+      let n = 0;
+      for (const el of [root, ...root.querySelectorAll("*")]) {
+        if (++n > 120) break;
+        sig +=
+          el.tagName + "." + (el.getAttribute("class") || "") + "|" +
+          (el.getAttribute("aria-pressed") || "") + (el.getAttribute("aria-checked") || "") + (el.getAttribute("aria-selected") || "") +
+          (el.disabled ? "d" : "") + (el.checked ? "c" : "") + ";";
+      }
+      return sig + "#" + (root.textContent || "").replace(/\s+/g, " ").replace(/\d+/g, "#").length;
+    } catch (_e) {
+      return "";
+    }
+  }
+
+  // Did the page take our option click? Any ONE of: it says the option is
+  // selected; it rebuilt the option list; the option list's state visibly
+  // changed; Submit went from disabled to enabled.
+  function optionMarkedEvidence(a, container) {
+    if (isOptionSelected(a.optionBtn) === true) return "the page reports the option selected";
+    if (a.replaced) return "the page rebuilt the option list";
+    if (optionListSig(a.optionBtn) !== a.sigBefore) return "the option list changed";
+    if (a.submitWasDisabled) {
+      const sb = findSubmitButton(container);
+      if (sb && !sb.disabled && sb.getAttribute("aria-disabled") !== "true") return "Submit became enabled";
+    }
+    return null;
+  }
+
+  function markAlreadySelected(a, btn, now) {
+    a.optionBtn = btn;
+    a.clickedAt = now;
+    if (!a.selectedAt) a.selectedAt = now;
+    if (!a.tSelected) a.tSelected = tnow();
+    if (!a.tMarked) a.tMarked = tnow();
+    a.tFirstDone = a.tFirstDone || tnow(); // your delay counts from now...
+    a.tLastDone = tnow() - 1000; // ...but the page took this selection long ago, so no minimum gap is owed
+    a.sawSelected = true;
   }
 
   function failAttempt(s, statusText, warnText) {
@@ -1082,40 +1246,46 @@
         }
         return;
       }
-      clickOption(s, a, btn, now);
+      if (isOptionSelected(btn) === true) {
+        // Already marked (by the page, or by you): clicking it again could
+        // UNSELECT it on a toggle-style option, so leave it alone.
+        log(`Option "${a.letter}" is already selected; not clicking it again.`);
+        markAlreadySelected(a, btn, now);
+      } else {
+        clickOption(s, a, btn, now);
+      }
       setStatus(`Selected "${a.letter}".`, "ready");
 
       if (!settings.autoSubmitEnabled) {
         log("Auto-submit is off; leaving submission to the user.");
+        const tm = timingBase(s, a);
+        setStatus(`Selected "${a.letter}" ${fmtMs(a.tSelected - tm.base)} ${tm.since}. Submitting is up to you.`, "ready");
         resetSelectionAfterPoll(); // one-shot, exactly like a submitted answer
         dropAttempt(s);
         return;
       }
       // Shorten the configured delay if it would run past the poll's real window.
-      a.delayMs = Math.min(settings.submitDelayMs, usableMs);
-      a.phase = "confirm";
-      return; // Submit must wait for the page to register the option — see below
+      // ("fast" keeps at least MIN_SUBMIT_GAP_MS between the option click and
+      // Submit because PW.live refuses a sooner one; "careful" keeps a frame;
+      // "exact" keeps nothing. A longer delay you set always wins.)
+      const mode = pacingMode();
+      const floor = mode === "careful" ? CONFIG.PACE_SUBMIT_MS : mode === "fast" ? Math.max(CONFIG.MIN_SUBMIT_GAP_MS, learnedSubmitGapMs) : 0;
+      a.userDelayMs = Math.min(settings.submitDelayMs, usableMs); // counted from the FIRST click
+      a.floorMs = Math.min(floor, usableMs); // counted from the LATEST click (the page only has to accept that one)
+      a.delayMs = Math.max(a.userDelayMs, a.floorMs); // the effective gap, for the readout
+      a.phase = a.tMarked ? "delay" : "confirm"; // already selected -> nothing to wait for
+      return; // otherwise Submit must wait for the page to register the option — see below
     }
 
-    // If the site re-rendered and replaced the option we clicked, look at the
-    // new element: if the page already shows it selected, that's our click
-    // carried over; otherwise our selection went with the old node — pick again.
+    // If the site rebuilt the option list and replaced the element we clicked,
+    // follow the new one. Do NOT click again: a second click on a rebuilt (and
+    // possibly toggle-style) option could UNSELECT it, and would hand the page a
+    // second selection for no reason.
     if (a.optionBtn && !a.optionBtn.isConnected) {
       const fresh = findMatchingOptionButton(container, a.letter);
-      if (fresh && isOptionSelected(fresh) === true) {
-        a.optionBtn = fresh;
-        a.sawSelected = true;
-        a.reacted = true;
-      } else {
-        if (++a.reselects > 3) {
-          failAttempt(s, `Selected "${a.letter}", but the poll kept re-rendering.`, "Option element kept getting replaced.");
-          return;
-        }
-        log("Option element was replaced by a re-render; selecting again.");
-        a.phase = "select";
-        a.startedAt = now;
-        return;
-      }
+      if (!fresh) return; // mid-rebuild — look again next step
+      a.optionBtn = fresh;
+      a.replaced = true; // the page rebuilt it in response to our click: that's a reaction
     }
 
     // The page can reset the selection under us (a re-render, a repeated
@@ -1138,26 +1308,58 @@
     }
 
     if (a.phase === "confirm") {
-      // Don't click Submit until the page has MARKED the option: it either
-      // reports it selected, or visibly reacted to our click. (Event-driven —
-      // typically a few ms. The cap only keeps a page that shows no sign at all
-      // from stalling us.)
-      const marked = a.sawSelected || a.reacted;
-      if (marked && !a.hopStarted) {
-        a.hopStarted = true;
-        // One more task so anything else the page queued for this click finishes.
-        afterSiteTask(() => {
-          a.hopDone = true;
-          if (session === s && s.attempt === a) superviseSession();
-        }, true);
+      // Don't click Submit until the page has MARKED the option. Evidence is the
+      // page saying so, the option list visibly changing, or Submit becoming
+      // enabled — event-driven, with no timer on the way in.
+      const why = optionMarkedEvidence(a, container);
+      if (why) {
+        if (!a.hopStarted) {
+          a.hopStarted = true;
+          const settle = () =>
+            afterSiteTask(() => {
+              a.hopDone = true;
+              if (session === s && s.attempt === a) superviseSession();
+            }, true);
+          // Default mode lets the page paint and finish its post-click work first
+          // (a frame), as the original did; fast mode only yields one task.
+          if (pacingMode() === "careful") nextFrame(settle);
+          else settle();
+        }
+        if (!a.hopDone) return;
+        stopOptionWatch(a);
+        if (!a.tMarked) a.tMarked = tnow();
+        a.phase = "delay";
+      } else {
+        const refused = a.pageErrorAt && a.pageErrorAt >= a.clickedAt;
+        const retryAfter = refused ? CONFIG.OPTION_RETRY_AFTER_ERROR_MS * a.tries : CONFIG.OPTION_RETRY_MS;
+        if (now - a.clickedAt >= retryAfter) {
+          // No sign the page took the click — maybe it wasn't ready. Nothing is
+          // selected, so clicking again is safe. Never submit an empty answer.
+          if (a.tries >= CONFIG.OPTION_MAX_TRIES) {
+            failAttempt(s, `Clicked "${a.letter}", but the page never marked it — so Submit was not clicked.`, "No sign that the page registered the option click.");
+            return;
+          }
+          log(`No sign the page took the click on "${a.letter}"; clicking again (try ${a.tries + 1} of ${CONFIG.OPTION_MAX_TRIES}).`);
+          clickOption(s, a, a.optionBtn, now);
+        }
+        return;
       }
-      if (!(marked && a.hopDone) && now - a.clickedAt < CONFIG.SELECTION_CONFIRM_MS) return;
-      stopOptionWatch(a);
-      a.phase = "delay";
     }
 
     if (a.phase === "delay") {
-      if (now - a.selectedAt < a.delayMs) return;
+      // Counted from the FIRST option click on the high-resolution clock, and
+      // woken by a timer so it lands on time rather than on the next frame.
+      const tn = tnow();
+      const dueIn = Math.max(a.userDelayMs - (tn - a.tFirstDone), a.floorMs - (tn - a.tLastDone));
+      if (dueIn > 0) {
+        if (!a.delayTimer) {
+          a.delayTimer = setTimeout(() => {
+            a.delayTimer = 0;
+            if (session === s && s.attempt === a) superviseSession();
+          }, dueIn);
+        }
+        return;
+      }
       a.phase = "submit";
       a.submitStartedAt = now;
       a.submitTimeoutMs = Math.min(CONFIG.SUBMIT_TIMEOUT_MS, usableMs);
@@ -1166,11 +1368,14 @@
     if (a.phase === "submit") {
       const btn = findSubmitButton(container);
       if (btn && !btn.disabled && btn.getAttribute("aria-disabled") !== "true") {
+        // Remember what the poll looks like at the instant of the click, so we
+        // can tell whether the page then reacted to it.
+        const preSig = outcomeSignature(container);
+        const preText = (btn.textContent || "").trim();
         btn.click();
-        const elapsed = now - a.submitStartedAt;
-        const note = elapsed > 60 ? " (waited for Submit to become clickable)" : "";
-        setStatus(`Submitted "${a.letter}" in ${elapsed}ms${note}.`, "success");
+        const tClick = tnow();
         s.answered = true;
+        beginSubmitCheck(s, a, btn, preSig, preText, tClick, now);
         dropAttempt(s);
         resetSelectionAfterPoll();
         return;
@@ -1185,12 +1390,246 @@
     }
   }
 
+  // ================= What the PAGE says back =================
+  // PW.live answers a click it doesn't like with an error such as
+  // "Unauthorised Scope Access". That message is the site's own — but only we
+  // know WHICH of our steps it followed, so we watch for it, say so in the
+  // status line, and (for a refused option click) retry sooner. This is what
+  // lets you tell whether the click timing in the popup is too aggressive.
+  const PAGE_ERROR_RE = /unauthori[sz]ed|scope access/i;
+
+  function watchPageErrors(s) {
+    if (s.errorObserver || !document.body) return;
+    try {
+      const looksLikeError = (t) => !!t && t.length <= 200 && PAGE_ERROR_RE.test(t);
+      const mo = new MutationObserver((records) => {
+        for (const r of records) {
+          if (r.type === "characterData") {
+            const t = (r.target.data || "").trim();
+            if (looksLikeError(t)) return onPageError(s, t);
+          }
+          for (const n of r.addedNodes) {
+            if (n.nodeType !== 1 && n.nodeType !== 3) continue;
+            const t = (n.textContent || "").trim();
+            if (looksLikeError(t)) return onPageError(s, t);
+          }
+        }
+      });
+      mo.observe(document.body, { childList: true, subtree: true, characterData: true });
+      s.errorObserver = mo;
+    } catch (err) {
+      logError("watchPageErrors failed", err);
+    }
+  }
+
+  function stopPageErrorWatch(s) {
+    if (s && s.errorObserver) {
+      s.errorObserver.disconnect();
+      s.errorObserver = null;
+    }
+  }
+
+  function onPageError(s, text) {
+    if (session !== s || s.state === "ended") return;
+    const t = tnow();
+    const last = s.pageErrors[s.pageErrors.length - 1];
+    if (last && t - last.t < 400) return; // the same toast re-rendering
+    s.pageErrors.push({ t, text });
+    log(`The PAGE showed "${text}" — that is PW.live's own message, not Poll Assist's.`);
+    const c = s.submitCheck;
+    const a = s.attempt;
+    if (c && !c.done) {
+      // It followed our Submit click: say so now instead of waiting out the 3 s.
+      c.pageError = { t, text };
+      finishSubmitCheck(s, null, false, "rejected");
+      return;
+    }
+    if (a && a.phase === "confirm" && a.clickedAt) {
+      // It followed our option click, which the page therefore refused. Retry soon.
+      a.pageErrorAt = Date.now();
+      superviseSession();
+    }
+  }
+
+  // ================= Did Submit actually take? =================
+  // Clicking Submit isn't the same as the page accepting it: a click can be
+  // ignored (a stale handler, a re-render in the middle of it...). So after
+  // the click we look for ANY sign the page reacted, and say honestly what we
+  // saw: confirmed (and how long it took) or "didn't confirm". There is
+  // deliberately no automatic retry — a second Submit could double-submit.
+
+  // Which moment the timing readout counts from, and how to say it. If you
+  // pick your answer after the poll is already running, the clock starts at
+  // your pick, so your own thinking time never looks like extension delay.
+  function timingBase(s, a) {
+    const pickedLater = !!a.armedPerf && (a.armedPerf > s.t0 || s.viaArm);
+    return pickedLater
+      ? { base: a.armedPerf, since: "after you picked it" }
+      : { base: s.t0, since: "after the poll appeared" };
+  }
+
+  // Like uiSignature, but digits are normalised so a ticking countdown or a
+  // live vote count can't be mistaken for "the page reacted".
+  function outcomeSignature(container) {
+    return container ? uiSignature(container, true) : null;
+  }
+
+  function submitEvidence(c, container) {
+    const b = c.btn;
+    if (!b.isConnected) return "the Submit button went away";
+    if (b.disabled || b.getAttribute("aria-disabled") === "true") return "the Submit button was disabled";
+    if ((b.textContent || "").trim() !== c.btnText) return "the Submit button changed";
+    if (c.wsSent) return "the page sent the answer over the poll socket";
+    if (!container) return "the poll view closed";
+    if (outcomeSignature(container) !== c.sig) return "the poll view changed";
+    return null;
+  }
+
+  function timelineText(c, why, tDone, outcome) {
+    const rel = (t) => (t ? `+${fmtMs(t - c.base)}` : "—");
+    const lines = [
+      `Click timing: ${c.mode}.  Measured from ${c.since === "after you picked it" ? "when you picked the answer" : "when the poll appeared"}:`,
+      `  poll on screen, answer ready   ${rel(c.tBegin)}`,
+      `  option clicked                 ${rel(c.tSelected)}`,
+      `  page registered it             ${rel(c.tMarked)}`,
+      `  Submit clicked                 ${rel(c.tClick)}   (your delay setting: ${Math.round(c.delayMs || 0)} ms)`,
+    ];
+    for (const e of c.errors || []) lines.push(`  PW.live showed "${e.text}"   ${rel(e.t)}   (not from Poll Assist)`);
+    if (tDone) {
+      if (why) lines.push(`  page confirmed                 ${rel(tDone)}   (${why})`);
+      else if (outcome === "rejected") lines.push("  the page refused the Submit (see the message above)");
+      else if (outcome === "ended") lines.push("  the poll ended before any confirmation was seen");
+      else lines.push(`  no confirmation seen within ${fmtMs(CONFIG.SUBMIT_CONFIRM_MS)}`);
+    }
+    return lines.join("\n");
+  }
+
+  function beginSubmitCheck(s, a, btn, preSig, preText, tClick, now) {
+    const tm = timingBase(s, a);
+    const c = {
+      letter: a.letter,
+      clickedAt: now,
+      tClick,
+      btn,
+      btnText: preText,
+      sig: preSig,
+      wsSent: false,
+      done: false,
+      observer: null,
+      base: tm.base,
+      since: tm.since,
+      sinceMs: tClick - tm.base,
+      tBegin: a.tBegin,
+      tSelected: a.tSelected,
+      tMarked: a.tMarked,
+      delayMs: a.delayMs,
+      mode: { fast: "Fast", careful: "Careful", exact: "Exact" }[pacingMode()],
+      gapMs: a.delayMs,
+      errors: s.pageErrors, // shared with the session: shows errors the page gave at ANY step of this poll
+      pageError: null,
+    };
+    s.submitCheck = c;
+    setStatus(`Submit clicked ${fmtMs(c.sinceMs)} ${c.since} — waiting for the page to confirm…`, "ready", timelineText(c, null, 0));
+    // A page that reacts inside the click is already done; otherwise watch for its reaction.
+    evaluateSubmitCheck(s, currentPollContainer(), now);
+    if (!c.done) watchSubmitOutcome(s, c);
+  }
+
+  // Notice the page's reaction the moment it happens, not on the next frame.
+  function watchSubmitOutcome(s, c) {
+    try {
+      const container = currentPollContainer();
+      const mo = new MutationObserver(() => {
+        if (c.done || session !== s || s.state === "ended") return;
+        evaluateSubmitCheck(s, currentPollContainer(), Date.now());
+      });
+      const deep = { attributes: true, childList: true, characterData: true, subtree: true };
+      if (container && container.parentElement) mo.observe(container.parentElement, { childList: true }); // the poll view itself being removed
+      if (container) mo.observe(container, deep);
+      if (c.btn.parentElement) mo.observe(c.btn.parentElement, deep);
+      c.observer = mo;
+    } catch (err) {
+      logError("watchSubmitOutcome failed", err);
+    }
+  }
+
+  function evaluateSubmitCheck(s, container, now, quiet) {
+    const c = s.submitCheck;
+    if (!c || c.done) return;
+    const why = submitEvidence(c, container);
+    // Once the deadline has passed the page closes/changes the poll view on its
+    // own, so a change seen then says nothing about OUR submit.
+    if (now > s.deadlineAt) {
+      finishSubmitCheck(s, null, quiet, "ended");
+      return;
+    }
+    if (why) {
+      finishSubmitCheck(s, why, quiet);
+      return;
+    }
+    if (now - c.clickedAt >= CONFIG.SUBMIT_CONFIRM_MS) finishSubmitCheck(s, null, quiet);
+  }
+
+  function finishSubmitCheck(s, why, quiet, outcome) {
+    const c = s.submitCheck;
+    if (!c || c.done) return;
+    c.done = true;
+    if (c.observer) {
+      c.observer.disconnect();
+      c.observer = null;
+    }
+    setTimeout(() => stopPageErrorWatch(s), 1500);
+    const tDone = tnow();
+    if (quiet) {
+      log("Submit check closed without a verdict:", why || "no sign of acceptance seen");
+      return;
+    }
+    const detail = timelineText(c, why, tDone, outcome);
+    if (why) {
+      setStatus(`Submitted "${c.letter}" ${fmtMs(c.sinceMs)} ${c.since} (the page confirmed ${fmtMs(tDone - c.tClick)} later).`, "success", detail);
+    } else if (outcome === "rejected") {
+      const pe = c.pageError;
+      const mode = pacingMode();
+      let hint;
+      if (mode === "exact") {
+        hint = "PW.live needs a few ms between the option click and Submit — raise Delay before submitting to at least 0.01 s, or pick Fast under Click timing.";
+      } else if (mode === "fast") {
+        // Wait longer before Submit on the next polls (this poll's Submit was already sent).
+        learnedSubmitGapMs = Math.min(100, Math.max(learnedSubmitGapMs, (c.gapMs || CONFIG.MIN_SUBMIT_GAP_MS) * 3, 30));
+        hint = `Poll Assist will wait ${Math.round(learnedSubmitGapMs)} ms before Submit from now on.`;
+      } else {
+        hint = "Try submitting by hand — if PW shows it then too, it's your PW session.";
+      }
+      setStatus(`Submit clicked ${fmtMs(c.sinceMs)} ${c.since}, but PW.live then showed "${pe.text}" (${fmtMs(pe.t - c.tClick)} later). ${hint}`, "warning", detail);
+      warn(`PW.live refused the Submit: "${pe.text}".`);
+    } else if (outcome === "ended") {
+      setStatus(`Submit clicked ${fmtMs(c.sinceMs)} ${c.since}, but the poll ended before the page confirmed it.`, "warning", detail);
+      warn("Submit was clicked, but the poll ended before any confirmation was seen.");
+    } else {
+      setStatus(`Submit clicked ${fmtMs(c.sinceMs)} ${c.since}, but the page didn't confirm it — check the poll.`, "warning", detail);
+      warn(`Submit was clicked, but the page showed no sign of accepting it within ${CONFIG.SUBMIT_CONFIRM_MS} ms.`);
+    }
+  }
+
+  // The page sending a poll frame after our Submit click is evidence the
+  // answer left the page (we can only see poll-topic WebSocket frames).
+  function noteOutgoingPollFrame(payload) {
+    const s = session;
+    const c = s && s.submitCheck;
+    if (!c || c.done) return;
+    const pid = payload && (payload.pollId || (payload.data && payload.data.pollId));
+    if (pid && s.meta && s.meta.pollId && pid !== s.meta.pollId) return;
+    c.wsSent = true;
+    evaluateSubmitCheck(s, currentPollContainer(), Date.now());
+  }
+
   // The user just armed an answer. If a poll is running right now, act on it
   // immediately (opening the panel if it isn't showing) instead of waiting
   // for the next one.
   function onAnswerArmed() {
     if (!selectedOption) return;
     armedAt = Date.now();
+    armedPerf = tnow();
     const s = session;
     if (s && s.state === "live") {
       // Already answered, or its window has passed: the pick is for the next poll.
@@ -1204,13 +1643,13 @@
       superviseSession();
       return;
     }
-    detectDomOnlyPoll();
+    detectDomOnlyPoll(true);
   }
 
   // ================= Fallback detection (no WebSocket info) =================
   // A live poll UI is on screen and an answer is armed, but no WebSocket
   // event told us about it (missed frame, socket reconnecting, ...).
-  function detectDomOnlyPoll() {
+  function detectDomOnlyPoll(viaArm) {
     if (!selectedOption) return;
     if (session && session.state === "live") return;
     // Right after a poll ends the site often shows a results view built from the
@@ -1220,7 +1659,7 @@
     if (!container) return;
     if (lastUiMark && lastUiMark.node === container && lastUiMark.sig === uiSignature(container)) return; // same UI we already dealt with
     if (!looksLikeLiveVote(container)) return;
-    beginSession({ id: `dom-${++sessionSeq}`, meta: null, source: "dom" });
+    beginSession({ id: `dom-${++sessionSeq}`, meta: null, source: "dom", viaArm });
   }
 
   // ================= Detecting a pending poll via the icon color =================
@@ -1521,7 +1960,8 @@
 
     const parsed = parseWSFrame(msg.data);
     if (parsed && parsed.topic === "poll") {
-      handlePollSocketPayload(parsed.payload);
+      if (msg.direction === "send") noteOutgoingPollFrame(parsed.payload);
+      else handlePollSocketPayload(parsed.payload);
     }
   });
 

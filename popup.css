@@ -1,23 +1,17 @@
 /* ============================================================
    Poll Assist — popup design tokens
-   Premium dark surface: translucent layering with a glass-edge
-   highlight, a single vivid accent with real depth (glow, not a
-   flat fill), spring-like easing on interactive elements, and
-   hover feedback throughout. Same visual language as the in-page
-   control (overlay.css) for one cohesive product feel.
    ============================================================ */
 :root {
-  --bg: #0a0b0d;
-  --surface: rgba(255, 255, 255, 0.035);
-  --surface-hover: rgba(255, 255, 255, 0.055);
-  --border: rgba(255, 255, 255, 0.08);
-  --edge-highlight: rgba(255, 255, 255, 0.09);
-  --text: #f7f8f8;
-  --text-dim: #8a8f98;
-  --text-faint: #5c6169;
-  --accent: #34d399;
-  --accent-glow: rgba(52, 211, 153, 0.35);
-  --warning: #f0b458;
+  --bg: #101216;
+  --surface: #191c22;
+  --surface-hover: rgba(255, 255, 255, 0.035);
+  --border: rgba(255, 255, 255, 0.075);
+  --edge-highlight: rgba(255, 255, 255, 0.045);
+  --text: #f2f4f7;
+  --text-dim: #a0a7b2;
+  --text-faint: #7c8490;
+  --accent: #8ab4f8;
+  --accent-glow: rgba(110, 155, 235, 0.2);
   --danger: #f47174;
   --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -28,10 +22,12 @@
 }
 
 body {
-  width: 304px;
+  width: 360px;
+  max-height: 720px;
   margin: 0;
   padding: 0;
-  background: var(--bg);
+  overflow-y: auto;
+  background: radial-gradient(ellipse at 50% -18%, #1a1f29 0, var(--bg) 52%);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -42,59 +38,83 @@ body {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 18px 18px 14px;
+  gap: 12px;
+  padding: 20px 20px 18px;
   overflow: hidden;
 }
 
 .app-header::before {
   content: "";
   position: absolute;
-  top: -34px;
-  left: 6px;
-  width: 100px;
-  height: 100px;
-  background: radial-gradient(circle, var(--accent-glow) 0%, rgba(52, 211, 153, 0.08) 45%, transparent 72%);
+  top: -48px;
+  left: 0;
+  width: 150px;
+  height: 130px;
+  background: radial-gradient(circle, var(--accent-glow) 0%, rgba(110, 155, 235, 0.06) 45%, transparent 72%);
   pointer-events: none;
 }
 
 .app-icon {
   position: relative;
-  border-radius: 7px;
+  border-radius: 9px;
   flex-shrink: 0;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  filter: grayscale(1);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
+}
+
+.brand-copy {
+  position: relative;
+  flex: 1;
 }
 
 .app-header h1 {
-  position: relative;
-  font-size: 14px;
+  font-size: 15px;
   margin: 0;
   font-weight: 700;
-  letter-spacing: -0.02em;
-  flex: 1;
+  letter-spacing: -0.03em;
+}
+
+.brand-copy p {
+  margin: 3px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
 }
 
 .version-badge {
   position: relative;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.035);
   font-size: 10px;
   font-weight: 600;
-  color: var(--text-faint);
+  color: var(--text-dim);
   letter-spacing: 0.02em;
   font-variant-numeric: tabular-nums;
+}
+
+/* ---- Settings groups ---- */
+.settings-content {
+  padding: 0 16px;
+}
+
+.section-heading {
+  margin: 15px 3px 8px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
 }
 
 /* ---- Settings card ---- */
 .settings-section {
   position: relative;
-  margin: 0 14px;
+  margin: 0;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  box-shadow: inset 0 1px 0 var(--edge-highlight), 0 6px 20px rgba(0, 0, 0, 0.25);
-}
-
-.settings-section + .settings-section {
-  margin-top: 10px;
+  border-radius: 12px;
+  box-shadow: inset 0 1px 0 var(--edge-highlight), 0 5px 16px rgba(0, 0, 0, 0.14);
 }
 
 .setting-row {
@@ -102,7 +122,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 13px 14px;
+  padding: 12px 13px;
   border-bottom: 1px solid var(--border);
   border-radius: 10px;
   transition: background 0.2s var(--ease-smooth);
@@ -113,14 +133,14 @@ body {
 }
 
 .settings-section .setting-row:first-child {
-  border-top-left-radius: 14px;
-  border-top-right-radius: 14px;
+  border-top-left-radius: 11px;
+  border-top-right-radius: 11px;
 }
 
 .settings-section .setting-row:last-child {
   border-bottom: none;
-  border-bottom-left-radius: 14px;
-  border-bottom-right-radius: 14px;
+  border-bottom-left-radius: 11px;
+  border-bottom-right-radius: 11px;
 }
 
 .setting-row.column {
@@ -128,6 +148,12 @@ body {
   align-items: stretch;
   gap: 9px;
   cursor: default;
+}
+
+.setting-row.pacing-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
 }
 
 .setting-label {
@@ -138,16 +164,56 @@ body {
 }
 
 .setting-title {
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 650;
   color: var(--text);
   letter-spacing: -0.005em;
 }
 
 .setting-desc {
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-dim);
   line-height: 1.45;
+}
+
+/* ---- Segmented choice (Click timing) ---- */
+.seg {
+  display: flex;
+  width: 100%;
+  padding: 3px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.seg button {
+  flex: 1;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: transparent;
+  border: 0;
+  padding: 7px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s var(--ease-smooth), color 0.2s var(--ease-smooth), box-shadow 0.2s var(--ease-smooth);
+}
+
+.seg button:hover {
+  color: var(--text);
+}
+
+.seg button[aria-checked="true"] {
+  color: #111722;
+  background: var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.seg button:focus-visible {
+  position: relative;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* ---- Toggle switch ---- */
@@ -168,8 +234,8 @@ body {
 .switch-track {
   display: flex;
   align-items: center;
-  width: 36px;
-  height: 21px;
+  width: 38px;
+  height: 22px;
   padding: 0 3px;
   background: rgba(255, 255, 255, 0.1);
   border-radius: 999px;
@@ -178,8 +244,8 @@ body {
 
 .switch-thumb {
   display: block;
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
   background: #e8eaec;
   border-radius: 50%;
@@ -193,8 +259,8 @@ body {
 }
 
 .switch input:checked + .switch-track .switch-thumb {
-  transform: translateX(15px);
-  background: #06120e;
+  transform: translateX(16px);
+  background: #111722;
 }
 
 .switch input:focus-visible + .switch-track {
@@ -209,11 +275,7 @@ body {
   gap: 12px;
 }
 
-/* Custom-styled range input: the fill-to-value gradient is driven by a
-   --pct custom property (set in JS on load and on every 'input' event),
-   since range inputs have no native way to express "filled portion" —
-   this is the standard technique behind every premium slider you've
-   seen (Stripe, Arc, native macOS controls). */
+/* The slider fill is driven by --pct from popup.js. */
 .slider {
   --pct: 0%;
   flex: 1;
@@ -255,6 +317,10 @@ body {
 }
 
 .slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 0 0 3px var(--accent);
+}
+
+.slider:focus-visible::-moz-range-thumb {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 0 0 3px var(--accent);
 }
 
@@ -318,6 +384,12 @@ body {
   outline: none;
 }
 
+.number-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
 .unit {
   font-size: 11px;
   font-weight: 600;
@@ -329,14 +401,16 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px 16px;
+  margin-top: 8px;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border);
 }
 
 .text-btn {
   background: none;
   border: none;
   color: var(--text-dim);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   padding: 5px 9px;
@@ -375,4 +449,15 @@ body {
 
 .save-indicator.error {
   color: var(--danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
